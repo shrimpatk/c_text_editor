@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
@@ -107,26 +108,62 @@ int getWindowSize(int *rows, int *cols) {
     }
 }
 
+/*** Append Buffer ***/
+
+struct abuf {
+    char *b; // pointer point to buffer
+    int len;
+};
+
+#define ABUF_INIT {NULL, 0} // Empty buffer act as a constructor for abuf type
+
+void abAppend(struct abuf *ab, const char *s, int len) {
+    // ab->b == (*ab).b access b from ab pointer and the same with (*ab).len
+    // realloc() accept two args pointer and new size
+    char *new = realloc(ab->b, ab->len + len);
+
+    if (new == NULL) return;
+
+    // memcpy() copy block of memory to another location
+    // accept 3 args 
+    // 1. where to copy to - &new[ab->len]
+    // 2. source pointer - s
+    // 3. number of bytes to copy - len
+    memcpy(&new[ab->len], s, len);
+    ab->b = new;
+    ab->len += len;
+}
+
+void abFree(struct abuf *ab) {
+    free(ab->b);
+}
+
 /*** output ***/
 
-void editorDrawRows() {
+void editorDrawRows(struct abuf *ab) {
     int y;
     for (y = 0; y < E.screen_rows; y++) {
-        write(STDOUT_FILENO, "~", 1);
+        abAppend(ab, "~", 1);
 
         if (y < E.screen_rows - 1) {
-            write(STDOUT_FILENO, "\r\n", 2);
+            abAppend(ab, "\r\n", 2);
         }
     }
 }
 
+// Append to buffer before write it to terminal
 void editorRefreshScreen() {
-    write(STDOUT_FILENO, "\x1b[2J", 4);
-    write(STDOUT_FILENO, "\x1b[H", 3);
+    struct abuf ab = ABUF_INIT;
+    abAppend(&ab, "\x1b[2J", 4);
+    abAppend(&ab, "\x1b[H", 3);
 
-    editorDrawRows();
+    editorDrawRows(&ab);
 
-    write(STDOUT_FILENO, "\x1b[H", 3);
+    abAppend(&ab, "\x1b[H", 3);
+
+    // Write buffer to terminal and using string and len from buf then clear ab buffer memory
+    write(STDOUT_FILENO, ab.b, ab.len);
+    abFree(&ab);
 }
 
 /*** input ***/
@@ -134,7 +171,7 @@ void editorRefreshScreen() {
 void editorProcessKeypress() {
     char c = editorReadKey();
 
-    switch (c){
+    switch (c) {
         case CRTL_KEY('q'): // ASCII 17 | 0x11
             write(STDOUT_FILENO, "\x1b[2J", 4);
             write(STDOUT_FILENO, "\x1b[H", 3);
