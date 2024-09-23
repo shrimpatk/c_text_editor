@@ -11,6 +11,7 @@
 
 /*** define ***/
 
+#define KILO_VERSION "0.0.1"
 #define CRTL_KEY(k) ((k) & 0x1f) // 1 = 0001, f = 1111 => 00011111 in binary 
 
 /*** data ***/
@@ -143,8 +144,33 @@ void abFree(struct abuf *ab) {
 void editorDrawRows(struct abuf *ab) {
     int y;
     for (y = 0; y < E.screen_rows; y++) {
-        abAppend(ab, "~", 1);
+        if (y == (E.screen_rows / 2) - 1) {
+            char welcome[80];
 
+            int welcome_len = snprintf(welcome, sizeof(welcome),
+            "What is this sorcery -- version %s", KILO_VERSION);
+
+            if (welcome_len > E.screen_cols) welcome_len = E.screen_cols;
+            
+            // padding value for one side
+            int padding = (E.screen_cols - welcome_len) / 2; 
+
+            // if append any char or whitespace padding--
+            // loop till there no padding left
+            // then append welcome message to buffer
+            if (padding) {
+                abAppend(ab, "~", 1);
+                padding--;
+            }
+
+            while (padding--) abAppend(ab, " ", 1);
+            abAppend(ab, welcome, welcome_len);
+        } else {
+            abAppend(ab, "~", 1);
+        }
+
+        // K is delete in line and 0 args is erase right of cursor
+        abAppend(ab, "\x1b[K", 3);
         if (y < E.screen_rows - 1) {
             abAppend(ab, "\r\n", 2);
         }
@@ -154,12 +180,18 @@ void editorDrawRows(struct abuf *ab) {
 // Append to buffer before write it to terminal
 void editorRefreshScreen() {
     struct abuf ab = ABUF_INIT;
-    abAppend(&ab, "\x1b[2J", 4);
+
+    // l command => Reset mode
+    // h command => Set mode
+    // ?25 arguments hide/showing cursor
+    abAppend(&ab, "\x1b[?25l", 6); // hide cursor
+    // abAppend(&ab, "\x1b[2J", 4); 
     abAppend(&ab, "\x1b[H", 3);
 
     editorDrawRows(&ab);
 
     abAppend(&ab, "\x1b[H", 3);
+    abAppend(&ab, "\x1b[?25h", 6); // show cursor
 
     // Write buffer to terminal and using string and len from buf then clear ab buffer memory
     write(STDOUT_FILENO, ab.b, ab.len);
