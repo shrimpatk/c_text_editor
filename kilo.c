@@ -14,16 +14,28 @@
 #define KILO_VERSION "0.0.1"
 #define CRTL_KEY(k) ((k) & 0x1f) // 1 = 0001, f = 1111 => 00011111 in binary 
 
+enum editorKey {
+    ARROW_LEFT = 1000,
+    ARROW_RIGHT,
+    ARROW_UP,
+    ARROW_DOWN,
+    DEL_KEY,
+    HOME_KEY,
+    END_KEY,
+    PAGE_UP,
+    PAGE_DOWN
+};
+
 /*** data ***/
 
 struct editorConfig {
+    int cursor_x, cursor_y;
     int screen_rows;
     int screen_cols;
     struct termios orig_termios;
 };
 
 struct editorConfig E;
-
 
 /*** terminal ***/
 
@@ -60,13 +72,55 @@ void enableRawMode() {
     if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1) die("tcsetattr");
 }
 
-char editorReadKey() {
+int editorReadKey() {
     int nread;
     char c;
     while ((nread = read(STDIN_FILENO, &c, 1)) != 1) { // nread = number of byte
         if (nread == -1 && errno != EAGAIN) die("read");
     }
-    return c;
+
+    if (c == '\x1b') {
+        char seq[3];
+
+        if (read(STDIN_FILENO, &seq[0], 1) != 1) return '\x1b';
+        if (read(STDIN_FILENO, &seq[1], 1) != 1) return '\x1b';
+
+        // Check if it have [ and then check if it PAGE_UP or ARROW_KEY if not return ESC
+        if (seq[0] == '[') {
+            if (seq[1] >= '0' && seq[1] <= '9') {
+                if (read(STDIN_FILENO, &seq[2], 1) != 1) return '\x1b';
+                if (seq[2] == '~') {
+                    switch (seq[1]) {
+                        case '1': return HOME_KEY;
+                        case '3': return DEL_KEY;
+                        case '4': return END_KEY;
+                        case '5': return PAGE_UP;
+                        case '6': return PAGE_DOWN;
+                        case '7': return HOME_KEY;
+                        case '8': return END_KEY;
+                    }
+                }
+            } else {
+                switch (seq[1]) {
+                    case 'A': return ARROW_UP;
+                    case 'B': return ARROW_DOWN;
+                    case 'C': return ARROW_RIGHT;
+                    case 'D': return ARROW_LEFT;
+                    case 'H': return HOME_KEY;
+                    case 'F': return END_KEY;
+                }
+            }
+        } else if (seq[0] == 'O') {
+            switch (seq[1]) {
+                case 'H': return HOME_KEY;
+                case 'F': return END_KEY;
+            }
+        }
+
+        return '\x1b';
+    } else {
+        return c;
+    }
 }
 
 // Fallback when ioctl() didn't work as expected
@@ -185,30 +239,80 @@ void editorRefreshScreen() {
     // h command => Set mode
     // ?25 arguments hide/showing cursor
     abAppend(&ab, "\x1b[?25l", 6); // hide cursor
-    // abAppend(&ab, "\x1b[2J", 4); 
     abAppend(&ab, "\x1b[H", 3);
 
     editorDrawRows(&ab);
 
-    abAppend(&ab, "\x1b[H", 3);
+    // This buffer instruct terminal to move cursor supplied coordinated
+    char buf[32];
+    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", E.cursor_y + 1, E.cursor_x + 1);
+    abAppend(&ab, buf, strlen(buf));
+
     abAppend(&ab, "\x1b[?25h", 6); // show cursor
 
-    // Write buffer to terminal and using string and len from buf then clear ab buffer memory
     write(STDOUT_FILENO, ab.b, ab.len);
     abFree(&ab);
 }
 
 /*** input ***/
 
+void editorMoveCursor(int key) {
+    switch (key) {
+        case ARROW_UP:
+            if (E.cursor_y != 0) {
+                E.cursor_y--;
+            }
+            break;
+        case ARROW_DOWN:
+            if (E.cursor_y != E.screen_rows - 1) {
+                E.cursor_y++;
+            }
+            break;
+        case ARROW_LEFT:
+            if (E.cursor_x != 0) {
+                E.cursor_x--;
+            }
+            break;
+        case ARROW_RIGHT:
+            if (E.cursor_x != E.screen_cols - 1) {
+                E.cursor_x++;
+            }
+            break;
+    }
+}
+
 void editorProcessKeypress() {
-    char c = editorReadKey();
+    int c = editorReadKey();
 
     switch (c) {
         case CRTL_KEY('q'): // ASCII 17 | 0x11
             write(STDOUT_FILENO, "\x1b[2J", 4);
             write(STDOUT_FILENO, "\x1b[H", 3);
-
             exit(0);
+            break;
+
+        case HOME_KEY:
+            E.cursor_x = 0;
+            break;
+
+        case END_KEY:
+            E.cursor_x = E.screen_cols - 1;
+            break;
+
+        case PAGE_UP:
+        case PAGE_DOWN:
+            {
+                int times = E.screen_rows;
+                while (times--)
+                    editorMoveCursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
+            }
+            break;
+
+        case ARROW_UP:
+        case ARROW_DOWN:
+        case ARROW_LEFT:
+        case ARROW_RIGHT:
+            editorMoveCursor(c);
             break;
     }
 }
@@ -216,6 +320,9 @@ void editorProcessKeypress() {
 /*** init ***/
 
 void initEditor() {
+    E.cursor_x = 0;
+    E.cursor_y = 0;
+
     if (getWindowSize(&E.screen_rows, &E.screen_cols) == -1) die("getWindowSize");
 }
 
