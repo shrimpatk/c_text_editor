@@ -18,34 +18,41 @@
 /*** define ***/
 
 #define KILO_VERSION "0.0.1"
+#define KILO_TAB_STOP 8
+
 #define CRTL_KEY(k) ((k) & 0x1f) // 1 = 0001, f = 1111 => 00011111 in binary 
 
 enum editorKey {
-    ARROW_LEFT = 1000,
-    ARROW_RIGHT,
-    ARROW_UP,
-    ARROW_DOWN,
-    DEL_KEY,
-    HOME_KEY,
-    END_KEY,
-    PAGE_UP,
-    PAGE_DOWN
+  ARROW_LEFT = 1000,
+  ARROW_RIGHT,
+  ARROW_UP,
+  ARROW_DOWN,
+  DEL_KEY,
+  HOME_KEY,
+  END_KEY,
+  PAGE_UP,
+  PAGE_DOWN
 };
 
 /*** data ***/
 
 typedef struct editor_row {
-    int size;
-    char *chars;
+  int size;
+  int rsize;
+  char *chars;
+  char *render;
 } editor_row;
 
 struct editorConfig {
-    int cursor_x, cursor_y;
-    int screen_rows;
-    int screen_cols;
-    int numrows;
-    editor_row *row;
-    struct termios orig_termios;
+  int cursor_x, cursor_y;
+  int render_x;
+  int row_offset;
+  int col_offset;
+  int screen_rows;
+  int screen_cols;
+  int numrows;
+  editor_row *row;
+  struct termios orig_termios;
 };
 
 struct editorConfig E;
@@ -137,45 +144,87 @@ int editorReadKey() {
 
 // Fallback when ioctl() didn't work as expected
 int getCursorPosition(int *rows, int *cols) {
-    char buf[32];
-    unsigned int i = 0;
+  char buf[32];
+  unsigned int i = 0;
 
-    // n command => query device status report
-    // 6 argument => ask for cursor position 
-    if (write(STDOUT_FILENO, "\x1b[6n", 4) != 4) return -1;
+  // n command => query device status report
+  // 6 argument => ask for cursor position 
+  if (write(STDOUT_FILENO, "\x1b[6n", 4) != 4) return -1;
 
-    while (i < sizeof(buf) - 1) {
-        if (read(STDIN_FILENO, &buf[i], 1) != 1) break;
-        if (buf[i] == 'R') break;
-        i++;
-    }
-    // String will always end with \0
-    buf[i] = '\0';
+  while (i < sizeof(buf) - 1) {
+    if (read(STDIN_FILENO, &buf[i], 1) != 1) break;
+    if (buf[i] == 'R') break;
+    i++;
+  }
+  // String will always end with \0
+  buf[i] = '\0';
 
-    // check if it contain escape sequence
-    if (buf[0] != '\x1b' || buf[1] != '[') return -1;
-    // read from &buf[2] and then parse it to rows and cols
-    if (sscanf(&buf[2], "%d;%d", rows, cols) != 2) return -1;
+  // check if it contain escape sequence
+  if (buf[0] != '\x1b' || buf[1] != '[') return -1;
+  // read from &buf[2] and then parse it to rows and cols
+  if (sscanf(&buf[2], "%d;%d", rows, cols) != 2) return -1;
 
-    return 0;
+  return 0;
 }
 
 int getWindowSize(int *rows, int *cols) {
-    struct winsize ws;
+  struct winsize ws;
 
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
-        if (write(STDOUT_FILENO, "\x1b[999C\x1b[999B", 12) != 12) return -1;
-        editorReadKey();
-        // if ioctl() failed to get winsize use getCursorPosition() as a fallback
-        return getCursorPosition(rows, cols);
-    } else {
-        *cols = ws.ws_col;
-        *rows = ws.ws_row;
-        return 0;
-    }
+  if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
+    if (write(STDOUT_FILENO, "\x1b[999C\x1b[999B", 12) != 12) return -1;
+    editorReadKey();
+    // if ioctl() failed to get winsize use getCursorPosition() as a fallback
+    return getCursorPosition(rows, cols);
+  } else {
+    *cols = ws.ws_col;
+    *rows = ws.ws_row;
+    return 0;
+  }
 }
 
 /*** Row Operations ***/
+
+// Convert chars index to render index
+// Loop though left of cursor_x to find many space to find correct cursor placement
+int editorRowCursorXToRenderX(editor_row *row, int cursor_x) {
+  int render_x = 0;
+  int j;
+  for (j = 0; j < cursor_x; j++) {
+    if (row->chars[j] == '\t')
+      render_x += (KILO_TAB_STOP - 1) - (render_x % KILO_TAB_STOP);
+    render_x++;
+  }
+  return render_x;
+}
+
+// First loop is find all the tabs in a row
+// allocate memory to fit mulitple white space instead of tab bytes
+// then loop to copy from row->chars to row->render to manipulate tabs size
+void editorUpdateRow(editor_row *row) {
+  int tabs = 0;
+  int j;
+  // Check how many tab there are for accuraty allocate memory with tabs size
+  for (j = 0; j < row->size; j++) {
+    if (row->chars[j] == '\t') tabs++;
+  }
+
+  free(row->render);
+  row->render = malloc(row->size + tabs*(KILO_TAB_STOP - 1) + 1);
+
+  int idx = 0;
+  for (j = 0; j < row->size; j++) {
+    // Loop to find the tabs size then replace tab with whitespace
+    // with KILO_TAB_STOP to control how many space tabs have
+    if (row->chars[j] == '\t') {
+      row->render[idx++] = ' ';
+      while (idx % KILO_TAB_STOP != 0) row->render[idx++] = ' ';
+    } else {
+      row->render[idx++] = row->chars[j];
+    }
+  }
+  row->render[idx] = '\0';
+  row->rsize = idx;
+}
 
 void editorAppendRow(char *s, size_t len) {
   E.row = realloc(E.row, sizeof(editor_row) * (E.numrows + 1));
@@ -185,6 +234,11 @@ void editorAppendRow(char *s, size_t len) {
   E.row[at].chars = malloc(len + 1);
   memcpy(E.row[at].chars, s, len);
   E.row[at].chars[len] = '\0';
+
+  E.row[at].rsize = 0;
+  E.row[at].render = NULL;
+  editorUpdateRow(&E.row[at]);
+
   E.numrows++;
 }
 
@@ -242,10 +296,34 @@ void abFree(struct abuf *ab) {
 
 /*** output ***/
 
+void editorScroll() {
+  E.render_x = 0;
+  if (E.cursor_y < E.numrows) {
+    E.render_x = editorRowCursorXToRenderX(&E.row[E.cursor_y], E.cursor_x);
+  }
+
+  // Check if cursor move above the visible area
+  if (E.cursor_y < E.row_offset) {
+    E.row_offset = E.cursor_y;
+  }
+  // Then check if cursor move below the visible area
+  if (E.cursor_y >= E.row_offset + E.screen_rows) {
+    E.row_offset = E.cursor_y - E.screen_rows + 1;
+  }
+  // Change to render_x because the tabs size is whitespace instead of \t
+  if (E.render_x < E.col_offset) {
+    E.col_offset = E.render_x;
+  }
+  if (E.render_x >= E.col_offset + E.screen_cols) {
+    E.col_offset = E.render_x - E.screen_cols + 1;
+  }
+}
+
 void editorDrawRows(struct abuf *ab) {
   int y;
   for (y = 0; y < E.screen_rows; y++) {
-    if (y >= E.numrows) {
+    int file_row = y + E.row_offset;
+    if (file_row >= E.numrows) {
       if (E.numrows == 0 && y == (E.screen_rows / 2) - 1) {
         char welcome[80];
 
@@ -268,13 +346,13 @@ void editorDrawRows(struct abuf *ab) {
         while (padding--) abAppend(ab, " ", 1);
         abAppend(ab, welcome, welcome_len);
       } else {
-          abAppend(ab, "~", 1); 
+        abAppend(ab, "~", 1);   
       }
     } else {
-        // if line size is greater than editor_cols cap that shit then append to buffer
-        int len = E.row[y].size;
-        if (len > E.screen_cols) len = E.screen_cols;
-        abAppend(ab, E.row[y].chars, len);
+      int len = E.row[file_row].rsize - E.col_offset;
+      if (len < 0) len = 0;
+      if (len > E.screen_cols) len = E.screen_cols;
+      abAppend(ab, &E.row[file_row].render[E.col_offset], len);
     }
 
     // K is delete in line and 0 args is erase right of cursor
@@ -287,6 +365,8 @@ void editorDrawRows(struct abuf *ab) {
 
 // Append to buffer before write it to terminal
 void editorRefreshScreen() {
+  editorScroll();
+
   struct abuf ab = ABUF_INIT;
 
   // l command => Reset mode
@@ -299,7 +379,8 @@ void editorRefreshScreen() {
 
   // This buffer instruct terminal to move cursor supplied coordinated
   char buf[32];
-  snprintf(buf, sizeof(buf), "\x1b[%d;%dH", E.cursor_y + 1, E.cursor_x + 1);
+  snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.cursor_y - E.row_offset) + 1, 
+                                            (E.render_x - E.col_offset) + 1);
   abAppend(&ab, buf, strlen(buf));
 
   abAppend(&ab, "\x1b[?25h", 6); // show cursor
@@ -311,6 +392,9 @@ void editorRefreshScreen() {
 /*** input ***/
 
 void editorMoveCursor(int key) {
+  // check the cursor if it on the actual line if it is row will point to editor_row[E.cursor_y]
+  editor_row *row = (E.cursor_y >= E.numrows) ? NULL : &E.row[E.cursor_y];
+
   switch (key) {
     case ARROW_UP:
       if (E.cursor_y != 0) {
@@ -318,20 +402,32 @@ void editorMoveCursor(int key) {
       }
       break;
     case ARROW_DOWN:
-      if (E.cursor_y != E.screen_rows - 1) {
+      if (E.cursor_y < E.numrows) {
         E.cursor_y++;
       }
       break;
     case ARROW_LEFT:
       if (E.cursor_x != 0) {
         E.cursor_x--;
+      } else if (E.cursor_y > 0) {
+        E.cursor_y--;
+        E.cursor_x = E.row[E.cursor_y].size;
       }
       break;
     case ARROW_RIGHT:
-      if (E.cursor_x != E.screen_cols - 1) {
+      if (row && E.cursor_x < row->size) {
         E.cursor_x++;
+      } else if (row && E.cursor_x == row->size) {
+        E.cursor_y++;
+        E.cursor_x = 0;
       }
       break;
+  }
+
+  row = (E.cursor_y >= E.numrows) ? NULL : &E.row[E.cursor_y];
+  int rowlen = row ? row->size : 0;
+  if (E.cursor_x > rowlen) {
+    E.cursor_x = rowlen;
   }
 }
 
@@ -350,12 +446,20 @@ void editorProcessKeypress() {
       break;
 
     case END_KEY:
-      E.cursor_x = E.screen_cols - 1;
+      if (E.cursor_y < E.numrows)
+        E.cursor_x = E.row[E.cursor_y].size;
       break;
 
     case PAGE_UP:
     case PAGE_DOWN:
       {
+        if (c == PAGE_UP) {
+          E.cursor_y = E.row_offset;
+        } else if (c == PAGE_DOWN) {
+          E.cursor_y = E.row_offset + E.screen_rows - 1;
+          if (E.cursor_y > E.numrows) E.cursor_y = E.numrows;
+        }
+
         int times = E.screen_rows;
         while (times--)
           editorMoveCursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
@@ -376,7 +480,10 @@ void editorProcessKeypress() {
 void initEditor() {
   E.cursor_x = 0;
   E.cursor_y = 0;
+  E.render_x = 0;
   E.numrows = 0;
+  E.row_offset = 0;
+  E.row = NULL;
 
   if (getWindowSize(&E.screen_rows, &E.screen_cols) == -1) die("getWindowSize");
 }
