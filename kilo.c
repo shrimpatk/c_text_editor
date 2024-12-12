@@ -20,6 +20,7 @@
 
 #define KILO_VERSION "0.0.1"
 #define KILO_TAB_STOP 8
+#define KILO_QUIT_TIMES 3
 
 #define CRTL_KEY(k) ((k) & 0x1f) // 1 = 0001, f = 1111 => 00011111 in binary 
 
@@ -54,6 +55,7 @@ struct editorConfig {
   int screen_cols;
   int numrows;
   editor_row *row;
+  int dirty;
   char *filename;
   char statusmsg[80];
   time_t statusmsg_time;
@@ -249,6 +251,20 @@ void editorAppendRow(char *s, size_t len) {
   editorUpdateRow(&E.row[at]);
 
   E.numrows++;
+  E.dirty++;
+}
+
+void editorFreeRow(editor_row *row) {
+  free(row->render);
+  free(row->chars);
+}
+
+void editorDelRow(int at) {
+  if (at < 0 || at >= E.numrows) return;
+  editorFreeRow(&E.row[at]);
+  memmove(&E.row[at], &E.row[at + 1], sizeof(editor_row) * (E.numrows - at -1));
+  E.numrows--;
+  E.dirty++;
 }
 
 void editorRowInsertChar(editor_row *row, int at, int c) {
@@ -258,6 +274,24 @@ void editorRowInsertChar(editor_row *row, int at, int c) {
   row->size++;
   row->chars[at] = c;
   editorUpdateRow(row);
+  E.dirty++;
+}
+
+void editorRowAppendString(editor_row *row, char *s, size_t len) {
+  row->chars = realloc(row->chars, row->size + len +1);
+  memcpy(&row->chars[row->size], s, len);
+  row->size += len;
+  row->chars[row->size] = '\0';
+  editorUpdateRow(row);
+  E.dirty++;
+}
+
+void editorRowDelChar(editor_row *row, int at) {
+  if (at < 0 || at >= row->size) return;
+  memmove(&row->chars[at], &row->chars[at + 1], row->size - at);
+  row->size--;
+  editorUpdateRow(row);
+  E.dirty++;
 }
 
 /*** Editor Operations ***/
@@ -268,6 +302,22 @@ void editorInsertChar(int c) {
   }
   editorRowInsertChar(&E.row[E.cursor_y], E.cursor_x, c);
   E.cursor_x++;
+}
+
+void editorDelChar() {
+  if (E.cursor_y == E.numrows) return;
+  if (E.cursor_x == 0 && E.cursor_y == 0) return;
+
+  editor_row *row = &E.row[E.cursor_y];
+  if (E.cursor_x > 0) {
+    editorRowDelChar(row, E.cursor_x - 1);
+    E.cursor_x--;
+  } else {
+    E.cursor_x = E.row[E.cursor_y - 1].size;
+    editorRowAppendString(&E.row[E.cursor_y - 1], row->chars, row->size);
+    editorDelRow(E.cursor_y);
+    E.cursor_y--;
+  }
 }
 
 /*** File I/O ***/
@@ -312,6 +362,7 @@ void editorOpen(char *filename) {
   }
   free(line);
   fclose(fp);
+  E.dirty = 0;
 }
 
 void editorSave() {
@@ -326,6 +377,7 @@ void editorSave() {
       if (write(fd, buf, len) != -1) {
         close(fd);
         free(buf);
+        E.dirty = 0;
         editorSetStatusMessage("%d bytes written to disk", len);
         return;
       }
@@ -336,6 +388,7 @@ void editorSave() {
   free(buf);
   editorSetStatusMessage("Can't save! I/O error: %s", strerror(errno));
 }
+
 /*** Append Buffer ***/
 
 struct abuf {
@@ -439,8 +492,9 @@ void editorDrawStatusBar(struct abuf *ab) {
   abAppend(ab, "\x1b[7m", 4);
 
   char status[80], rstatus[80];
-  int len = snprintf(status, sizeof(status), "%.20s - %d lines",
-                     E.filename ? E.filename : "[No name]", E.numrows);
+  int len = snprintf(status, sizeof(status), "%.20s - %d lines %s",
+                     E.filename ? E.filename : "[No name]", E.numrows,
+                     E.dirty ? "(modified)" : "");
   int rlen = snprintf(rstatus, sizeof(rstatus), "%d/%d",
                       E.cursor_y + 1, E.numrows);
   if (len > E.screen_cols) len = E.screen_cols;
@@ -545,6 +599,8 @@ void editorMoveCursor(int key) {
 }
 
 void editorProcessKeypress() {
+  static int quit_times = KILO_QUIT_TIMES;
+
   int c = editorReadKey();
 
   switch (c) {
@@ -553,6 +609,13 @@ void editorProcessKeypress() {
       break;
 
     case CRTL_KEY('q'): // ASCII 17 | 0x11
+      if (E.dirty && quit_times > 0) {
+        editorSetStatusMessage("Warning!!! File has unsaved changes. "
+          "Press Ctrl-Q %d more times to quit.", quit_times);
+        quit_times--;
+        return;
+      }
+      
       write(STDOUT_FILENO, "\x1b[2J", 4);
       write(STDOUT_FILENO, "\x1b[H", 3);
       exit(0);
@@ -574,7 +637,8 @@ void editorProcessKeypress() {
     case BACKSPACE:
     case CRTL_KEY('h'):
     case DEL_KEY:
-      /* TODO */
+      if (c == DEL_KEY) editorMoveCursor(ARROW_RIGHT);
+      editorDelChar();
       break;
 
     case PAGE_UP:
@@ -608,6 +672,8 @@ void editorProcessKeypress() {
       editorInsertChar(c);
       break;
   }
+
+  quit_times = KILO_QUIT_TIMES;
 }
 
 /*** init ***/
@@ -619,6 +685,7 @@ void initEditor() {
   E.numrows = 0;
   E.row_offset = 0;
   E.row = NULL;
+  E.dirty = 0;
   E.filename = NULL;
   E.statusmsg[0] = '\0';
   E.statusmsg_time = 0;
